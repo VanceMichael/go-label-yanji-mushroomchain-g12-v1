@@ -82,7 +82,7 @@ func listBatches(ctx context.Context, q queryer, filter repository.BatchFilter) 
 		return nil, 0, mapSQLError(err)
 	}
 	pageArgs := append(append([]any{}, args...), filter.Page.Size, filter.Page.Offset())
-	rows, err := q.QueryContext(ctx, `SELECT `+batchColumns+` FROM substrate_batches WHERE `+clause+` ORDER BY produced_at DESC,id LIMIT ? OFFSET ?`, pageArgs...)
+	rows, err := q.QueryContext(ctx, `SELECT `+batchColumns+` FROM substrate_batches WHERE `+clause+` ORDER BY expires_at ASC,produced_at ASC,id LIMIT ? OFFSET ?`, pageArgs...)
 	if err != nil {
 		return nil, 0, mapSQLError(err)
 	}

@@ -225,6 +225,47 @@ func TestAllocateOrderRollsBackWhenCapacityIsInsufficient(t *testing.T) {
 	}
 }
 
+func TestAllocateOrderConsumesEarliestExpiringBatchFirst(t *testing.T) {
+	f := newServiceFixture(t)
+	later := f.data.Batch(domain.BatchReleased, 10)
+	later.ID = "batch-later-expiry"
+	later.Code = "BATCH-LATER-EXPIRY"
+	later.ProducedAt = f.data.Now.Add(-time.Hour)
+	later.ExpiresAt = f.data.Now.Add(10 * 24 * time.Hour)
+	earlier := f.data.Batch(domain.BatchReleased, 10)
+	earlier.ID = "batch-earlier-expiry"
+	earlier.Code = "BATCH-EARLIER-EXPIRY"
+	earlier.ProducedAt = f.data.Now.Add(-48 * time.Hour)
+	earlier.ExpiresAt = f.data.Now.Add(2 * 24 * time.Hour)
+	for _, batch := range []domain.SubstrateBatch{later, earlier} {
+		if err := f.data.Store.CreateBatch(context.Background(), batch); err != nil {
+			t.Fatal(err)
+		}
+	}
+	order, err := f.orders.Create(f.ctx(domain.RoleDispatcher), CreateOrderInput{BuyerName: "Buyer", DeliveryRegion: "Yinchuan", IdempotencyKey: "expiry-order", DueAt: f.data.Now.Add(time.Hour), Lines: []domain.OrderLine{{Species: "oyster", Quantity: 6, UnitPriceCents: 400}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.orders.Allocate(f.ctx(domain.RoleDispatcher), AllocateInput{OrderID: order.ID, ExpectedVersion: order.Version, RequestID: "allocate-expiry-order"}); err != nil {
+		t.Fatalf("allocate: %v", err)
+	}
+	earlierStored, err := f.data.Store.GetBatch(context.Background(), f.data.TenantID, earlier.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	laterStored, err := f.data.Store.GetBatch(context.Background(), f.data.TenantID, later.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allocations, err := f.data.Store.ListAllocations(context.Background(), f.data.TenantID, order.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if earlierStored.QuantityAvailable != 4 || laterStored.QuantityAvailable != 10 || len(allocations) != 1 || allocations[0].BatchID != earlier.ID {
+		t.Fatalf("earlier=%+v later=%+v allocations=%+v", earlierStored, laterStored, allocations)
+	}
+}
+
 func TestAllocateAndDeliverCreatesFarmSettlement(t *testing.T) {
 	f := newServiceFixture(t)
 	batch := f.data.Batch(domain.BatchReleased, 20)

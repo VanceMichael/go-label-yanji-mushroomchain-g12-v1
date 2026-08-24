@@ -194,6 +194,29 @@ func TestBatchVersionConflict(t *testing.T) {
 	}
 }
 
+func TestListReleasedBatchesUsesStableExpiryOrder(t *testing.T) {
+	f := newStoreFixture(t)
+	ctx := context.Background()
+	later := f.batch("later-expiry", domain.BatchReleased, 10)
+	later.ProducedAt = f.now.Add(-time.Hour)
+	later.ExpiresAt = f.now.Add(10 * 24 * time.Hour)
+	earlier := f.batch("earlier-expiry", domain.BatchReleased, 10)
+	earlier.ProducedAt = f.now.Add(-48 * time.Hour)
+	earlier.ExpiresAt = f.now.Add(2 * 24 * time.Hour)
+	for _, batch := range []domain.SubstrateBatch{later, earlier} {
+		if err := f.store.CreateBatch(ctx, batch); err != nil {
+			t.Fatal(err)
+		}
+	}
+	items, total, err := f.store.ListBatches(ctx, repository.BatchFilter{TenantID: f.tenant, Species: "oyster", Status: domain.BatchReleased, Page: pagination.Page{Number: 1, Size: 20}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 2 || len(items) != 2 || items[0].ID != earlier.ID || items[1].ID != later.ID {
+		t.Fatalf("expiry ordered batches=%+v total=%d", items, total)
+	}
+}
+
 func TestConditionalAllocationAndRestore(t *testing.T) {
 	f := newStoreFixture(t)
 	ctx := context.Background()
