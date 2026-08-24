@@ -1,7 +1,4 @@
-ARG GO_IMAGE=golang:1.26.1-alpine
-ARG RUNTIME_IMAGE=alpine:3.23
-
-FROM ${GO_IMAGE} AS build
+FROM golang:1.26.1-alpine AS build
 ARG TARGETOS=linux
 ARG TARGETARCH
 WORKDIR /src
@@ -12,7 +9,7 @@ RUN resolved_arch="${TARGETARCH:-$(go env GOARCH)}" && \
     CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$resolved_arch" GOTOOLCHAIN=local \
     go build -trimpath -ldflags="-s -w" -o /out/mushroomchain ./cmd/server
 
-FROM ${RUNTIME_IMAGE}
+FROM alpine:3.23
 RUN apk add --no-cache ca-certificates tzdata && addgroup -S app && adduser -S -G app app
 WORKDIR /app
 COPY --from=build /out/mushroomchain /usr/local/bin/mushroomchain
