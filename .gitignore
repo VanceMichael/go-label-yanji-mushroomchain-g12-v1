@@ -1,0 +1,8 @@
+/mushroomchain.db
+/mushroomchain.db-shm
+/mushroomchain.db-wal
+/coverage.out
+/.env
+/.idea/
+/.vscode/
+*.log
