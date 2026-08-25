@@ -1,0 +1,197 @@
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
+    applied_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS tenants (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id),
+    farm_id TEXT,
+    email TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('operator','farmer','inspector','dispatcher','finance')),
+    password_hash TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (tenant_id, email)
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at TEXT NOT NULL,
+    revoked_at TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS sessions_user_active_idx ON sessions(user_id, expires_at, revoked_at);
+
+CREATE TABLE IF NOT EXISTS farms (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id),
+    name TEXT NOT NULL,
+    village TEXT NOT NULL,
+    owner_user_id TEXT NOT NULL REFERENCES users(id),
+    settlement_name TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (tenant_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS substrate_batches (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id),
+    farm_id TEXT NOT NULL REFERENCES farms(id),
+    code TEXT NOT NULL,
+    species TEXT NOT NULL,
+    produced_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    quantity_produced INTEGER NOT NULL CHECK (quantity_produced > 0),
+    quantity_available INTEGER NOT NULL CHECK (quantity_available >= 0),
+    unit_price_cents INTEGER NOT NULL CHECK (unit_price_cents > 0),
+    status TEXT NOT NULL CHECK (status IN ('registered','sampling','released','rejected','exhausted','archived')),
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (tenant_id, code),
+    CHECK (quantity_available <= quantity_produced)
+);
+CREATE INDEX IF NOT EXISTS batches_available_idx ON substrate_batches(tenant_id, species, status, expires_at);
+
+CREATE TABLE IF NOT EXISTS quality_inspections (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id),
+    batch_id TEXT NOT NULL REFERENCES substrate_batches(id),
+    inspector_id TEXT NOT NULL REFERENCES users(id),
+    decision TEXT NOT NULL CHECK (decision IN ('pending','approved','rejected')),
+    moisture_bp INTEGER NOT NULL CHECK (moisture_bp BETWEEN 0 AND 10000),
+    sample_count INTEGER NOT NULL CHECK (sample_count > 0),
+    notes TEXT NOT NULL DEFAULT '',
+    inspected_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (batch_id, inspector_id, inspected_at)
+);
+CREATE INDEX IF NOT EXISTS inspections_batch_idx ON quality_inspections(batch_id, decision);
+
+CREATE TABLE IF NOT EXISTS orders (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id),
+    buyer_name TEXT NOT NULL,
+    delivery_region TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('draft','confirmed','allocated','in_transit','delivered','cancelled','settled')),
+    idempotency_key TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    total_cents INTEGER NOT NULL CHECK (total_cents >= 0),
+    requested_at TEXT NOT NULL,
+    due_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (tenant_id, idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS orders_status_due_idx ON orders(tenant_id, status, due_at);
+
+CREATE TABLE IF NOT EXISTS order_lines (
+    id TEXT PRIMARY KEY,
+    order_id TEXT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    species TEXT NOT NULL,
+    quantity INTEGER NOT NULL CHECK (quantity > 0),
+    unit_price_cents INTEGER NOT NULL CHECK (unit_price_cents > 0)
+);
+CREATE INDEX IF NOT EXISTS order_lines_order_idx ON order_lines(order_id);
+
+CREATE TABLE IF NOT EXISTS inventory_allocations (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id),
+    order_id TEXT NOT NULL REFERENCES orders(id),
+    line_id TEXT NOT NULL REFERENCES order_lines(id),
+    batch_id TEXT NOT NULL REFERENCES substrate_batches(id),
+    quantity INTEGER NOT NULL CHECK (quantity > 0),
+    created_at TEXT NOT NULL,
+    UNIQUE (line_id, batch_id)
+);
+CREATE INDEX IF NOT EXISTS allocations_order_idx ON inventory_allocations(order_id);
+CREATE INDEX IF NOT EXISTS allocations_batch_idx ON inventory_allocations(batch_id);
+
+CREATE TABLE IF NOT EXISTS shipments (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id),
+    order_id TEXT NOT NULL UNIQUE REFERENCES orders(id),
+    status TEXT NOT NULL CHECK (status IN ('pending','claimed','dispatched','delivered','failed')),
+    carrier TEXT NOT NULL DEFAULT '',
+    tracking_number TEXT NOT NULL DEFAULT '',
+    claimed_by TEXT NOT NULL DEFAULT '',
+    lease_until TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS shipments_claim_idx ON shipments(status, lease_until, updated_at);
+
+CREATE TABLE IF NOT EXISTS settlements (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id),
+    farm_id TEXT NOT NULL REFERENCES farms(id),
+    order_id TEXT NOT NULL REFERENCES orders(id),
+    amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+    status TEXT NOT NULL CHECK (status IN ('pending','approved','paid','failed')),
+    version INTEGER NOT NULL DEFAULT 1,
+    approved_by TEXT NOT NULL DEFAULT '',
+    approved_at TEXT,
+    paid_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (farm_id, order_id)
+);
+CREATE INDEX IF NOT EXISTS settlements_status_idx ON settlements(tenant_id, status, updated_at);
+
+CREATE TABLE IF NOT EXISTS idempotency_records (
+    digest TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id),
+    response_code INTEGER NOT NULL,
+    response_body BLOB NOT NULL,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idempotency_expiry_idx ON idempotency_records(expires_at);
+
+CREATE TABLE IF NOT EXISTS outbox_events (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id),
+    aggregate_type TEXT NOT NULL,
+    aggregate_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    payload BLOB NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending','claimed','delivered','dead')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    available_at TEXT NOT NULL,
+    lease_owner TEXT NOT NULL DEFAULT '',
+    lease_until TEXT,
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    delivered_at TEXT
+);
+CREATE INDEX IF NOT EXISTS outbox_claim_idx ON outbox_events(status, available_at, lease_until);
+
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id),
+    actor_id TEXT NOT NULL REFERENCES users(id),
+    request_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    object_type TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN ('succeeded','rejected','failed')),
+    metadata BLOB,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS audit_object_idx ON audit_logs(tenant_id, object_type, object_id, created_at);
