@@ -65,6 +65,12 @@ func (s *AuthService) Authenticate(ctx context.Context, token string) (Identity,
 	}
 	session, user, err := s.repo.FindSessionByTokenHash(ctx, auth.HashToken(token))
 	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return Identity{}, domain.ErrUnauthorized
+		}
+		if errors.Is(err, domain.ErrDependency) {
+			return Identity{}, domain.ErrUnauthorized
+		}
 		return Identity{}, domain.ErrUnauthorized
 	}
 	if !session.ActiveAt(s.clock.Now()) || !user.Active {

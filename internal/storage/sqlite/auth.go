@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -94,7 +95,11 @@ func findSession(ctx context.Context, q queryer, tokenHash string) (domain.Sessi
 		&user.ID, &user.TenantID, &farm, &user.Email, &user.DisplayName, &user.Role, &user.PasswordHash,
 		&active, &userCreated, &userUpdated)
 	if err != nil {
-		return domain.Session{}, domain.User{}, mapSQLError(err)
+		mapped := mapSQLError(err)
+		if mapped != nil && !errors.Is(mapped, domain.ErrNotFound) {
+			return domain.Session{}, domain.User{}, domain.DependencyError{Operation: "find session", Err: mapped}
+		}
+		return domain.Session{}, domain.User{}, mapped
 	}
 	session.ExpiresAt, err = parseTime(expires)
 	if err != nil {
