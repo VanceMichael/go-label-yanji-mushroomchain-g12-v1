@@ -54,30 +54,35 @@ func (s *SettlementService) Approve(ctx context.Context, input ApproveSettlement
 		return domain.Settlement{}, err
 	}
 	now := s.clock.Now()
-	item, err := s.repo.GetSettlement(ctx, actor.TenantID, input.SettlementID)
+	err = s.tx.WithinTx(ctx, func(tx repository.Tx) error {
+		item, e := tx.GetSettlement(ctx, actor.TenantID, input.SettlementID)
+		if e != nil {
+			return e
+		}
+		if item.Status != domain.SettlementPending {
+			return domain.StateError{Entity: "settlement", From: string(item.Status), To: string(domain.SettlementApproved)}
+		}
+		if item.Version != input.ExpectedVersion {
+			return domain.ErrVersionConflict
+		}
+		if e = tx.ApproveSettlement(ctx, actor.TenantID, item.ID, item.Version, actor.UserID, now); e != nil {
+			return e
+		}
+		payload, _ := json.Marshal(map[string]any{"settlement_id": item.ID, "approved_by": actor.UserID, "amount_cents": item.AmountCents})
+		eventID, e := auth.NewID("evt")
+		if e != nil {
+			return e
+		}
+		if e = tx.CreateOutboxEvent(ctx, domain.OutboxEvent{ID: eventID, TenantID: actor.TenantID, AggregateType: "settlement", AggregateID: item.ID, EventType: "settlement.approved", Payload: payload, Status: domain.OutboxPending, AvailableAt: now, CreatedAt: now}); e != nil {
+			return e
+		}
+		auditEvent, e := newAudit(actor, input.RequestID, "settlement.approve", "settlement", item.ID, audit.OutcomeSucceeded, map[string]any{"amount_cents": item.AmountCents}, now)
+		if e != nil {
+			return e
+		}
+		return tx.CreateAudit(ctx, auditEvent)
+	})
 	if err != nil {
-		return domain.Settlement{}, err
-	}
-	if item.Status != domain.SettlementPending {
-		return domain.Settlement{}, domain.StateError{Entity: "settlement", From: string(item.Status), To: string(domain.SettlementApproved)}
-	}
-	if item.Version != input.ExpectedVersion {
-		return domain.Settlement{}, domain.ErrVersionConflict
-	}
-	if err = s.repo.ApproveSettlement(ctx, actor.TenantID, item.ID, item.Version, actor.UserID, now); err != nil {
-		return domain.Settlement{}, err
-	}
-	payload, _ := json.Marshal(map[string]any{"settlement_id": item.ID, "approved_by": actor.UserID, "amount_cents": item.AmountCents})
-	eventID, err := auth.NewID("evt")
-	if err != nil {
-		return domain.Settlement{}, err
-	}
-	auditEvent, err := newAudit(actor, input.RequestID, "settlement.approve", "settlement", item.ID, audit.OutcomeSucceeded, map[string]any{"amount_cents": item.AmountCents}, now)
-	if err != nil {
-		return domain.Settlement{}, err
-	}
-	event := domain.OutboxEvent{ID: eventID, TenantID: actor.TenantID, AggregateType: "settlement", AggregateID: item.ID, EventType: "settlement.approved", Payload: payload, Status: domain.OutboxPending, AvailableAt: now, CreatedAt: now}
-	if err = s.repo.RecordSettlementApproval(ctx, event, auditEvent); err != nil {
 		return domain.Settlement{}, err
 	}
 	return s.repo.GetSettlement(ctx, actor.TenantID, input.SettlementID)
