@@ -195,6 +195,52 @@ func TestCreateOrderIsIdempotentAndConfirmed(t *testing.T) {
 	}
 }
 
+func TestCreateOrderRejectsChangedPayloadUnderReusedIdempotencyKey(t *testing.T) {
+	f := newServiceFixture(t)
+	ctx := f.ctx(domain.RoleDispatcher)
+	original := CreateOrderInput{BuyerName: "Minning Buyer", DeliveryRegion: "Yinchuan", IdempotencyKey: "replay-or-conflict", RequestID: "request-order", DueAt: f.data.Now.Add(24 * time.Hour), Lines: []domain.OrderLine{{Species: "oyster", Quantity: 12, UnitPriceCents: 400}}}
+	first, err := f.orders.Create(ctx, original)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// Replaying the identical payload returns the original order untouched.
+	replayed, err := f.orders.Create(ctx, original)
+	if err != nil {
+		t.Fatalf("identical replay: %v", err)
+	}
+	if replayed.ID != first.ID || replayed.Status != first.Status || replayed.Version != first.Version {
+		t.Fatalf("replay diverged: got=%+v want=%+v", replayed, first)
+	}
+
+	// Reusing the key for a different business payload must surface a conflict,
+	// not silently return the first order.
+	changed := original
+	changed.BuyerName = "Different Buyer"
+	changed.DeliveryRegion = "Guyuan"
+	changed.Lines = []domain.OrderLine{{Species: "shiitake", Quantity: 3, UnitPriceCents: 500}}
+	if _, err := f.orders.Create(ctx, changed); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("changed payload error=%v want conflict", err)
+	}
+
+	// The original order, its lines, status, version and audit stay unchanged.
+	stored, err := f.data.Store.GetOrder(context.Background(), f.data.TenantID, first.ID)
+	if err != nil {
+		t.Fatalf("get stored: %v", err)
+	}
+	if stored.BuyerName != "Minning Buyer" || stored.DeliveryRegion != "Yinchuan" || stored.Status != domain.OrderConfirmed || stored.Version != 2 || stored.TotalCents != 4800 || len(stored.Lines) != 1 || stored.Lines[0].Species != "oyster" {
+		t.Fatalf("original order mutated=%+v", stored)
+	}
+	items, total, err := f.data.Store.ListOrders(context.Background(), repository.OrderFilter{TenantID: f.data.TenantID, Page: pagination.Page{Number: 1, Size: 20}})
+	if err != nil || total != 1 || len(items) != 1 {
+		t.Fatalf("orders=%+v total=%d err=%v", items, total, err)
+	}
+	events, auditTotal, err := f.data.Store.ListAudit(context.Background(), f.data.TenantID, "order", first.ID, pagination.Page{Number: 1, Size: 20})
+	if err != nil || auditTotal != 1 || events[0].Action != "order.create" {
+		t.Fatalf("audit=%+v total=%d err=%v", events, auditTotal, err)
+	}
+}
+
 func TestAllocateOrderRollsBackWhenCapacityIsInsufficient(t *testing.T) {
 	f := newServiceFixture(t)
 	batch := f.data.Batch(domain.BatchReleased, 5)

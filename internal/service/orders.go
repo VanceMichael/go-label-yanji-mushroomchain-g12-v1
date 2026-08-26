@@ -52,7 +52,7 @@ func (s *OrderService) Create(ctx context.Context, input CreateOrderInput) (doma
 		input.RequestFingerprint = FingerprintOrderRequest(input)
 	}
 	if existing, e := s.repo.FindOrderByIdempotency(ctx, actor.TenantID, input.IdempotencyKey); e == nil {
-		return existing, nil
+		return s.replayOrConflict(existing, input.RequestFingerprint)
 	} else if !errors.Is(e, domain.ErrNotFound) {
 		return domain.Order{}, e
 	}
@@ -90,11 +90,30 @@ func (s *OrderService) Create(ctx context.Context, input CreateOrderInput) (doma
 	})
 	if err != nil {
 		if errors.Is(err, domain.ErrConflict) {
-			return s.repo.FindOrderByIdempotency(ctx, actor.TenantID, input.IdempotencyKey)
+			existing, e := s.repo.FindOrderByIdempotency(ctx, actor.TenantID, input.IdempotencyKey)
+			if e != nil {
+				return domain.Order{}, err
+			}
+			return s.replayOrConflict(existing, input.RequestFingerprint)
 		}
 		return domain.Order{}, err
 	}
 	return s.repo.GetOrder(ctx, actor.TenantID, id)
+}
+
+// replayOrConflict implements idempotency for order creation. When an order
+// already exists for the supplied Idempotency-Key the request is replayed only
+// when it carries the same payload fingerprint as the original request; in that
+// case the original confirmed order is returned untouched. A different payload
+// proves the caller is attempting a distinct business action under a reused
+// key, so the original order (its lines, status, version, and audit) is left
+// untouched and a conflict is surfaced so the caller knows the new payload was
+// not accepted.
+func (s *OrderService) replayOrConflict(existing domain.Order, fingerprint string) (domain.Order, error) {
+	if existing.RequestFingerprint == fingerprint {
+		return existing, nil
+	}
+	return domain.Order{}, domain.ConflictError{Resource: "order", Reason: "idempotency key reused with different payload"}
 }
 
 type AllocateInput struct {
