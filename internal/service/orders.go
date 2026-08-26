@@ -140,10 +140,6 @@ func (s *OrderService) Allocate(ctx context.Context, input AllocateInput) (domai
 			return domain.Order{}, domain.ErrCapacity
 		}
 	}
-	if err = s.repo.CreateAllocations(ctx, allocations); err != nil {
-		return domain.Order{}, err
-	}
-
 	err = s.tx.WithinTx(ctx, func(tx repository.Tx) error {
 		current, e := tx.GetOrder(ctx, actor.TenantID, input.OrderID)
 		if e != nil {
@@ -156,6 +152,9 @@ func (s *OrderService) Allocate(ctx context.Context, input AllocateInput) (domai
 			return domain.StateError{Entity: "order", From: string(current.Status), To: string(domain.OrderAllocated)}
 		}
 		if e = tx.AllocateBatches(ctx, actor.TenantID, reservations, now); e != nil {
+			return e
+		}
+		if e = tx.CreateAllocations(ctx, allocations); e != nil {
 			return e
 		}
 		if e := tx.TransitionOrder(ctx, actor.TenantID, current.ID, current.Version, domain.OrderAllocated, now); e != nil {
